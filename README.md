@@ -11,7 +11,13 @@
 - [Liskov Substitution Principle (LSP)](#liskov-substitution-principle-lsp)
 - [Interface Segregation Principle (ISP)](#interface-segregation-principle-isp)
 - [Dependency Inversion Principle (DIP)](#dependency-inversion-principle-dip)
+- [Couplage et cohésion — la métrique sous SOLID](#couplage-et-cohésion--la-métrique-sous-solid)
+- [Composition plutôt qu'héritage](#composition-plutôt-quhéritage)
+- [Tell-Don't-Ask — la conséquence pratique](#tell-dont-ask--la-conséquence-pratique)
+- [Catalogue des anti-patrons OOP](#catalogue-des-anti-patrons-oop)
+- [CUPID — l'alternative de Dan North](#cupid--lalternative-de-dan-north)
 - [Pièges classiques et idées reçues](#pièges-classiques-et-idées-reçues)
+- [La controverse — *« seul le S compte »*](#la-controverse--seul-le-s-compte)
 - [Quand NE PAS appliquer SOLID](#quand-ne-pas-appliquer-solid)
 - [Pour aller plus loin](#pour-aller-plus-loin)
 
@@ -371,6 +377,96 @@ record Carre(double cote) implements Forme {
 
 L'immuabilité (records Java, classes `readonly` en PHP 8.2+) supprime de fait les violations historiques du LSP. C'est l'une des raisons pour lesquelles la programmation par objets-valeurs immuables est devenue dominante.
 
+### Au-delà du carré/rectangle — exemples plus parlants
+
+Le couple *Carré/Rectangle* est devenu si récurrent qu'il occulte d'autres violations plus instructives, qu'on rencontre tous les jours sans les voir.
+
+#### L'autruche est-elle un oiseau ?
+
+```php
+abstract class Oiseau {
+    abstract public function voler(): void;
+}
+
+final class Hirondelle extends Oiseau {
+    public function voler(): void { /* ok */ }
+}
+
+final class Autruche extends Oiseau {
+    public function voler(): void {
+        throw new LogicException('Une autruche ne vole pas.');
+    }
+}
+```
+
+Une fonction `migrer(Oiseau $o) { $o->voler(); ... }` casse dès qu'on lui passe une `Autruche`. Le LSP est violé : la postcondition implicite *« après `voler()`, l'oiseau est en l'air »* ne tient plus. La correction n'est pas de retravailler la hiérarchie mais de **ségréguer par capacité** :
+
+```php
+interface OiseauVolant { public function voler(): void; }
+
+final class Hirondelle implements OiseauVolant { public function voler(): void { /* ok */ } }
+final class Autruche {
+    public function courir(): void { /* ok */ }
+}
+```
+
+L'autruche reste un oiseau au sens du domaine ; elle n'est plus *substituable* à un `OiseauVolant`. C'est le mariage typique LSP + ISP : on ne déclare la capacité que là où elle existe vraiment.
+
+#### `ImmutableSet` étend-il `Set` ?
+
+Plus subtil et omniprésent : on hérite d'une interface mutable pour fournir une version immuable.
+
+```php
+interface Ensemble {
+    public function ajouter(mixed $element): void;
+    public function contient(mixed $element): bool;
+}
+
+final class EnsembleImmuable implements Ensemble {
+    public function __construct(private readonly array $elements) {}
+    public function ajouter(mixed $element): void {
+        throw new BadMethodCallException('Immuable');
+    }
+    public function contient(mixed $element): bool { return in_array($element, $this->elements, true); }
+}
+```
+
+Tout client qui reçoit un `Ensemble` croit pouvoir lui ajouter un élément ; la version immuable lance une exception. Violation directe du LSP, et symptôme typique des bibliothèques de collections de la première génération (Java avant les `List.of(...)`). La solution propre : ne pas faire hériter `Immuable` de la version mutable, mais définir `EnsembleLecture` comme racine et `EnsembleMutable` comme sur-ensemble :
+
+```php
+interface EnsembleLecture {
+    public function contient(mixed $element): bool;
+    public function taille(): int;
+}
+
+interface EnsembleMutable extends EnsembleLecture {
+    public function ajouter(mixed $element): void;
+}
+```
+
+L'immuable implémente `EnsembleLecture` et rien d'autre ; il est *vraiment* substituable partout où la lecture seule suffit. C'est la trace la plus pure du LSP : la hiérarchie **suit les capacités**, pas la familiarité du nom.
+
+#### Le compte bancaire et la *history rule*
+
+```php
+class CompteCourant {
+    public function __construct(protected float $solde) {}
+    public function deposer(float $m): void { $this->solde += $m; }
+    public function retirer(float $m): void {
+        if ($m > $this->solde) throw new DomainException('Solde insuffisant');
+        $this->solde -= $m;
+    }
+}
+
+class CompteEpargneBloque extends CompteCourant {
+    public function retirer(float $m): void {
+        throw new DomainException('Retraits bloqués jusqu\'à échéance.');
+    }
+}
+```
+
+Aucune signature ne change ; aucune précondition n'est *renforcée* explicitement. Pourtant, la **règle d'historique** est violée : le supertype autorisait la séquence d'états *(dépôt, retrait, dépôt, retrait)* ; le sous-type ne l'autorise plus. Tout code qui orchestrait des comptes en s'appuyant sur cette séquence est cassé. Le LSP n'est pas dans la signature, il est dans **les transitions d'état que les clients tenaient pour acquises**.
+
 ### Détecter une violation en revue
 
 Indices fréquents :
@@ -468,6 +564,14 @@ Appliqué mécaniquement, l'ISP conduit à une interface par méthode (*« role 
 - Les conteneurs DI explosent en bindings redondants.
 
 La règle pratique : segmenter quand un *client réel* sous-utilise l'interface, ou quand deux groupes de méthodes évoluent à des rythmes différents. Ne pas segmenter par esthétique.
+
+### Le bon mètre — *role interfaces* (Martin Fowler)
+
+Fowler distingue deux familles d'interfaces :
+- **Header interfaces** : on prend une classe existante et on en *extrait* l'ensemble de ses méthodes publiques pour en faire l'interface. Le nom évoque la *header* C : un duplicata structurel. Ces interfaces ont autant de méthodes que la classe et tendent vers la *fat interface*.
+- **Role interfaces** : on déclare l'interface du *point de vue d'un appelant précis*, avec uniquement les méthodes que ce rôle consomme. Une classe peut implémenter plusieurs *role interfaces*, chacune correspondant à un contrat avec un type d'appelant.
+
+Le bon mètre n'est donc pas *« combien de méthodes ? »* mais *« combien de rôles distincts cette interface mélange-t-elle ? »*. Une interface de douze méthodes peut être saine si elle correspond à un seul rôle ; une de trois méthodes est obèse si elle en mélange deux. C'est cette grille qui rend l'ISP utilisable sans tomber dans l'explosion d'interfaces : on dérive le découpage de la *forme du dialogue avec les clients*, pas d'une cardinalité.
 
 ### Quand assouplir
 
@@ -600,6 +704,250 @@ Pour du code utilitaire sans variation prévisible (parser de fichier, formatage
 
 [🔝 Retour en haut de page](#table-des-matières)
 
+## Couplage et cohésion — la métrique sous SOLID
+
+SOLID est un *moyen*, pas une *fin*. La fin que les cinq principes essaient d'atteindre tient en deux mots venus de Larry Constantine et Edward Yourdon dans les années 1970 : **couplage faible**, **cohésion forte**. Comprendre cette boussole, c'est cesser de réciter les principes et commencer à les juger.
+
+### Couplage — neuf nuances de dépendance
+
+Le couplage n'est pas binaire ; il y a une hiérarchie classique, du plus toxique au plus sain :
+
+1. **Couplage de contenu** — un module modifie directement les variables internes d'un autre (équivalent du `friend` C++ poussé à l'extrême). Toxique.
+2. **Couplage commun** — deux modules partagent des données globales mutables. Toxique : les changements deviennent imprévisibles.
+3. **Couplage de contrôle** — A passe à B un *flag* qui change la branche d'exécution interne de B. Médiocre : B doit connaître les intentions de A.
+4. **Couplage de timbre** *(stamp)* — A passe une grosse structure à B alors que B n'en utilise qu'un champ. Symptôme d'ISP non appliqué.
+5. **Couplage de données** — A passe à B exactement les paramètres dont B a besoin. **Acceptable, voire idéal.**
+6. **Couplage de message** — A et B ne dialoguent que par envoi de messages typés (objets-messages, événements). **Idéal.**
+
+SOLID essaie globalement de pousser le code vers (5) et (6). DIP cible l'élimination du (1)/(2) entre couches ; ISP cible le (4) ; SRP réduit les couplages internes implicites (deux raisons de changer dans la même classe).
+
+### Cohésion — sept nuances aussi
+
+Symétriquement, sept niveaux de cohésion, du plus mauvais au meilleur :
+
+1. **Cohésion fortuite** — les méthodes sont dans la même classe par accident historique.
+2. **Cohésion logique** — *« toutes les opérations de validation »*, mais sur des objets différents.
+3. **Cohésion temporelle** — *« tout ce qui se fait au démarrage »*.
+4. **Cohésion procédurale** — étapes successives d'un même algorithme.
+5. **Cohésion de communication** — les méthodes opèrent sur les mêmes données.
+6. **Cohésion séquentielle** — la sortie d'une méthode est l'entrée de la suivante.
+7. **Cohésion fonctionnelle** — toutes les méthodes contribuent à *une seule tâche bien définie*. **Idéal.**
+
+Le SRP, lu correctement, vise la cohésion fonctionnelle alignée sur un *acteur* unique. Une classe qui n'a qu'une raison de changer mais quatre tâches indépendantes (cohésion logique) viole encore l'esprit du principe.
+
+### La loi de Constantine
+
+> *« Bon code = couplage faible entre modules, cohésion forte à l'intérieur. »*
+
+C'est cette maxime que SOLID instrumente. Si une *application* d'un principe SOLID **augmente** le couplage ou **réduit** la cohésion, on l'applique mal — peu importe l'orthodoxie de la lecture. Le principe est subordonné à la métrique, pas l'inverse.
+
+[🔝 Retour en haut de page](#table-des-matières)
+
+## Composition plutôt qu'héritage
+
+L'OOP des années 1990 (Java 1.0, premiers manuels Eiffel et Smalltalk) survalorisait l'héritage : *est-un* partout, hiérarchies à six niveaux, *frameworks* qui obligeaient à `extends` une classe de base pour tout. Trente ans plus tard, le verdict est tombé : **l'héritage profond est presque toujours une erreur**. Les bibliothèques modernes (Go, Rust, Kotlin, Swift, PHP moderne) misent sur les interfaces, traits, composition et délégation.
+
+### Pourquoi l'héritage déçoit
+
+- **Couplage maximal** : la sous-classe dépend de l'implémentation interne du parent, pas seulement de son contrat. Un changement dans le parent peut casser silencieusement les enfants (problème dit *fragile base class*).
+- **Combinatoire impossible** : si on a `Oiseau`/`Mammifère` et `Volant`/`Nageur`/`Coureur`, l'héritage simple impose de choisir une seule dimension. Avec quatre dimensions à deux valeurs, on a 16 sous-classes potentielles.
+- **Substitution risquée** : voir LSP. La majorité des violations LSP viennent d'un héritage forcé alors qu'une autre relation conviendrait.
+- **Évolution unilatérale** : en composition, on peut changer un composant à l'exécution ; en héritage, jamais.
+
+### Le test de l'« est-un » contre le test de l'« joue le rôle de »
+
+Avant d'écrire `class B extends A`, posez-vous : *« B est-il intrinsèquement un A, ou B joue-t-il temporairement le rôle de A pour un certain client ? »*. Le second cas appelle une interface, pas un héritage. Une `EntréeJournal` peut *jouer le rôle* de `MessageHorodaté` sans en *être un*.
+
+### Strategy par composition — l'exemple canonique
+
+```php
+// Anti-pattern : héritage pour varier l'algorithme
+abstract class Tri {
+    abstract public function trier(array $data): array;
+}
+final class TriRapide extends Tri { /* ... */ }
+final class TriFusion extends Tri { /* ... */ }
+
+class GestionnaireDocuments extends TriRapide { /* couplage figé à un tri précis */ }
+```
+
+```php
+// Composition : on injecte la stratégie
+interface Tri {
+    public function trier(array $data): array;
+}
+
+final class TriRapide implements Tri { /* ... */ }
+final class TriFusion implements Tri { /* ... */ }
+
+final class GestionnaireDocuments {
+    public function __construct(private Tri $tri) {}
+    public function indexer(array $documents): array {
+        return $this->tri->trier($documents);
+    }
+}
+```
+
+On peut maintenant changer la stratégie de tri à l'exécution, la tester avec une stratégie factice, et `GestionnaireDocuments` ne dépend que d'un *contrat* — pas d'un parent.
+
+### Délégation explicite — le *vrai* hello world OOP moderne
+
+```php
+final class JournalEvenements {
+    public function __construct(private readonly Horloge $horloge) {}
+    public function consigner(string $message): void {
+        // on délègue au composant Horloge, on n'en hérite pas
+        echo '[' . $this->horloge->maintenant()->format('c') . "] {$message}\n";
+    }
+}
+```
+
+`JournalEvenements` *a une* `Horloge` ; il n'en *est pas une*. On peut injecter une `HorlogeFigée` en test sans toucher au journal. Pas une seule ligne d'héritage.
+
+### Quand l'héritage reste légitime
+
+- **Template Method** très restreint : le squelette est *vraiment* invariant et seules une ou deux étapes varient. Et encore, la plupart de ces cas se ramènent à une fonction d'ordre supérieur.
+- **Sous-typage strict d'un type valeur immuable** où le LSP est garanti par construction (records, enums avec méthodes).
+- **Contraintes de framework** : certains frameworks imposent `extends` (rare, mais ça arrive).
+
+Adage à retenir : *« Préférer la composition à l'héritage »* (Gang of Four, 1994) — c'est le plus court résumé de SOLID lu honnêtement.
+
+[🔝 Retour en haut de page](#table-des-matières)
+
+## Tell-Don't-Ask — la conséquence pratique
+
+> *« Tell, don't ask. »* — Alec Sharp, popularisé par Martin Fowler.
+
+### Le principe
+
+Au lieu de demander à un objet son état pour ensuite décider à sa place, on lui **dit ce qu'il faut faire** et on le laisse décider en interne. *Ask* casse l'encapsulation : on tire les données dehors, on raisonne ailleurs, on remet les données dedans. *Tell* respecte l'encapsulation : la décision reste collée aux données qu'elle concerne.
+
+### Pourquoi c'est la conséquence directe de SOLID
+
+- **SRP** — si la décision reste à l'extérieur, deux modules partagent la responsabilité (les données + la règle). Tell-Don't-Ask la concentre.
+- **OCP** — l'ajout d'une nouvelle règle ne modifie pas l'appelant ; il enrichit l'objet ou son polymorphisme.
+- **LSP** — on parle au contrat, pas aux internals : un sous-type peut redéfinir son comportement sans casser l'appelant.
+
+### *Ask* — l'anti-patron
+
+```php
+final class Panier {
+    /** @var Article[] */ public array $articles = [];
+    public bool $promo = false;
+}
+
+// Logique métier dispersée dans l'appelant
+function totalPanier(Panier $p): float {
+    $total = 0.0;
+    foreach ($p->articles as $a) {
+        $total += $a->prix;
+    }
+    if ($p->promo) {
+        $total *= 0.9;
+    }
+    return $total;
+}
+```
+
+L'appelant interroge le panier (`$p->articles`, `$p->promo`), prend la décision (multiplier par 0.9), recompose. Si la promo passe à 8 %, ou s'ajoute une seconde règle (panier > 100 € = livraison gratuite), c'est l'appelant qui change. Les invariants ne sont protégés par personne.
+
+### *Tell* — l'expression OOP
+
+```php
+final class Panier {
+    /** @param Article[] $articles */
+    public function __construct(
+        private array $articles = [],
+        private bool $promo = false,
+    ) {}
+
+    public function ajouter(Article $a): void { $this->articles[] = $a; }
+    public function appliquerPromo(): void { $this->promo = true; }
+
+    public function total(): float {
+        $total = array_sum(array_map(fn(Article $a) => $a->prix, $this->articles));
+        return $this->promo ? $total * 0.9 : $total;
+    }
+}
+
+// Côté appelant — sans logique
+$p->ajouter($article);
+$p->appliquerPromo();
+$facture = $p->total();
+```
+
+L'appelant *dit* (`appliquerPromo`, `ajouter`) puis *demande le résultat fini* (`total`). Toute évolution des règles reste dans `Panier`. Les `instanceof`, les `if` portant sur l'état, les *getters* dépouillés s'évanouissent.
+
+### Le pendant : *getters* sont parfois nécessaires
+
+Tell-Don't-Ask n'interdit pas les *getters* — un objet doit pouvoir exposer ce qui sert à l'affichage, à la sérialisation, à la persistance. La règle est : **ne pas baser une décision métier sur le *getter* d'un autre objet**. Lecture pour communiquer, *tell* pour décider.
+
+[🔝 Retour en haut de page](#table-des-matières)
+
+## Catalogue des anti-patrons OOP
+
+SOLID se comprend par contraste. Voici les anti-patrons les plus diagnostiqués en revue de code.
+
+### God Class (classe-Dieu)
+
+Une classe qui sait tout, fait tout, voit tout. Symptômes : 800+ lignes, 30+ méthodes publiques, dépendances vers la moitié du système. La *God Class* est l'incarnation de la violation simultanée de SRP, ISP et OCP. Refactoring : identifier les *acteurs* qui poussent au changement et extraire un module par acteur.
+
+### Anaemic Domain Model (objet anémique)
+
+Inverse symétrique de la God Class : des objets qui ne sont que des sacs à *getters/setters*, et toute la logique métier se trouve dans des *services* qui les manipulent de l'extérieur. Critique de Martin Fowler (*Anemic Domain Model*, 2003) : c'est *« procedural code masquerading as objects »*. Symptôme typique : un domaine de 200 *entités* et 200 *services*, avec zéro méthode métier dans les entités. Violation flagrante du Tell-Don't-Ask et, par ricochet, de l'encapsulation.
+
+### Service Locator
+
+Un objet global (souvent statique) à qui on demande ses dépendances : `ServiceLocator::get(MailerInterface::class)`. Symptômes : on ne peut plus lire la signature d'un constructeur pour savoir ce dont la classe dépend, les tests deviennent fragiles (état global), le DIP est masqué (on dépend de `ServiceLocator`, pas d'une abstraction propre). Préférer toujours l'injection par constructeur.
+
+### Singleton (mal utilisé)
+
+Le Singleton n'est pas mauvais en soi (configuration immuable, registre de logger). Il devient toxique dès qu'il porte de l'**état mutable** : on a recréé une variable globale, déguisée. Le Singleton mutable casse les tests (impossible d'isoler), masque les dépendances (on ne voit pas qui s'en sert), bloque la parallélisation. Règle : si vous écrivez `Foo::getInstance()`, demandez-vous pourquoi vous ne passez pas `Foo` en argument.
+
+### Smart UI / Presentation Heavy
+
+Toute la logique métier vit dans le contrôleur ou la vue. *« On itère les commandes, on filtre celles qui datent de plus de 30 jours, on calcule le total, on affiche. »* Au moindre changement de règle, on cherche dans des templates. Antidote : remettre la logique sur les objets du domaine et faire de la vue un simple *renderer*.
+
+### Feature Envy
+
+Une méthode de la classe A passe son temps à appeler les *getters* de la classe B pour décider quelque chose. La méthode appartient en réalité à B (Tell-Don't-Ask). Refactoring : *Move Method* (Fowler).
+
+### Shotgun Surgery
+
+Le moindre changement métier oblige à toucher dix fichiers. Symptôme inverse de la God Class : la responsabilité est trop dispersée. Diagnostic souvent lié à un découpage horizontal (par couche technique) qui devrait être vertical (par cas d'usage).
+
+### Refused Bequest
+
+Un sous-type *refuse* l'héritage qu'il reçoit : il redéfinit la moitié des méthodes du parent en `throw new UnsupportedOperationException`. Signal qu'on a confondu *est-un* et *partage du code*. La composition ou une autre interface auraient été plus justes.
+
+[🔝 Retour en haut de page](#table-des-matières)
+
+## CUPID — l'alternative de Dan North
+
+En 2022, Dan North (l'inventeur du *Behaviour-Driven Development*) propose **CUPID** comme alternative — ou plutôt complément — à SOLID, avec un parti pris : remplacer des règles structurelles par des *propriétés observables* d'un code agréable à utiliser.
+
+| Lettre | Propriété             | Idée                                                                                |
+| ------ | --------------------- | ----------------------------------------------------------------------------------- |
+| **C**  | **Composable**        | Le module se branche facilement à d'autres ; petite surface, peu de prérequis.      |
+| **U**  | **Unix-philosophy**   | Faire une chose, la faire bien ; produire des sorties consommables par d'autres.    |
+| **P**  | **Predictable**       | Comportement déterministe, prévisible, observable ; pas d'effets de bord cachés.    |
+| **I**  | **Idiomatic**         | Écrit dans le style attendu par le langage et l'écosystème (PSR en PHP, *go fmt*).  |
+| **D**  | **Domain-based**      | La structure du code suit la structure du domaine, pas une architecture générique.  |
+
+### Pourquoi CUPID intéresse même un partisan de SOLID
+
+- **Propriétés vs règles** : SOLID dit *quoi faire* ; CUPID dit *à quoi ressemble* un bon code, en laissant le moyen ouvert.
+- **Composable > Open/Closed** : on s'intéresse à la facilité d'agencement plutôt qu'à un point d'extension formel — souvent moins coûteux.
+- **Predictable** intègre l'observabilité, les logs, les métriques — absents de SOLID.
+- **Idiomatic** rappelle qu'un code SOLID *non-idiomatique* dans un écosystème lui fait plus de mal qu'un code moins SOLID mais lisible par tous.
+- **Domain-based** rejoint le *Domain-Driven Design* (Eric Evans, 2003) : organiser par cas d'usage métier, pas par couche technique.
+
+### Verdict honnête
+
+CUPID ne remplace pas SOLID ; il l'enrobe et déplace l'attention. Un module peut respecter SOLID *sur le papier* et ne pas être *composable* (interfaces trop génériques, configuration intrusive). À l'inverse, un module *composable, prévisible, idiomatique* respecte de fait la majorité de SOLID sans qu'on ait besoin de réciter le mantra. À garder dans la boîte à outils intellectuelle, surtout en revue de bibliothèque ou de framework.
+
+[🔝 Retour en haut de page](#table-des-matières)
+
 ## Pièges classiques et idées reçues
 
 Une lecture rapide de SOLID conduit à des contresens qui font plus de mal que de bien. Les voici, principe par principe.
@@ -623,6 +971,31 @@ Une interface par méthode n'est pas l'objectif. L'objectif est qu'aucun client 
 ### OCP — fermé pour de mauvaises raisons
 
 Fermer une classe à toute modification, y compris aux corrections de bugs ou aux évolutions internes qui ne touchent pas son contrat, est une lecture intégriste. Le *fermé* du OCP signifie : *fermé pour ajouter des cas de variation prévus*. Refactoriser le corps d'une méthode sans changer son contrat n'est pas une violation de l'OCP. Idem, anticiper toutes les extensions imaginables produit des hiérarchies abstraites mort-nées : on attend la deuxième occurrence du besoin avant de figer un point d'extension.
+
+[🔝 Retour en haut de page](#table-des-matières)
+
+## La controverse — *« seul le S compte »*
+
+Une critique récurrente, popularisée notamment par David Heinemeier Hansson (DHH, créateur de Ruby on Rails) et reprise par une partie du monde Python/Ruby, dit en substance : *« sur les cinq, seul le **S** survit à l'épreuve du quotidien ; les quatre autres sont soit triviaux, soit nocifs s'ils sont appliqués sans nuance »*. La position est trop tranchée pour être adoptée, mais elle mérite d'être prise au sérieux principe par principe.
+
+### L'argument détaillé
+
+- **SRP** est, en pratique, le seul des cinq dont l'absence se traduit *immédiatement* par une douleur observable : fichiers énormes, conflits de *merge*, peur d'éditer. Sa formulation *« une raison de changer »* survit à tous les paradigmes (procédural, OOP, fonctionnel).
+- **OCP** est un idéal sur lequel l'expérience tempère l'enthousiasme. *On ne peut pas être ouvert à toutes les variations* (théorème d'impossibilité informel) ; on doit choisir *à quelle dimension* on veut être ouvert. Mal anticipée, l'abstraction crée plus de dette qu'elle n'en évite.
+- **LSP** est un théorème, pas une heuristique : il dit ce que doit garantir un sous-typage correct. Mais il ne se *« suit »* pas activement — on ne décide pas chaque matin de respecter le LSP, on découvre une violation lors d'un bug.
+- **ISP** se ramène, dans 90 % des projets de gestion modernes, à *« n'écrivez pas d'interface obèse »*. Une fois cette règle de bon sens absorbée, l'ISP n'apporte plus grand-chose au quotidien.
+- **DIP** est puissant mais s'incarne déjà dans les pratiques courantes (DI par constructeur, ports/adapters). On peut faire excellent code en pensant *hexagonal* sans avoir jamais récité le DIP.
+
+### Notre position
+
+La caricature *« seul le S compte »* sert d'aiguillon utile : elle force à se demander *« quelle douleur précise est-ce que je soigne ? »* avant d'introduire une abstraction. Pour autant, les quatre autres principes ne sont pas redondants :
+
+- **OCP** reste vital dans les *frameworks* et les bibliothèques destinés à des tiers.
+- **LSP** reste indispensable dès qu'une hiérarchie sérieuse apparaît, et le simple fait de connaître la *history rule* évite des bugs subtils.
+- **ISP** reste pertinent quand l'on conçoit l'interface d'un service partagé.
+- **DIP** reste structurant pour quiconque vise une architecture testable.
+
+Le bon résumé : SRP est le **principe que l'on applique tous les jours sans réfléchir** ; les quatre autres sont des **outils dont on connaît l'existence et qu'on dégaine quand le contexte les justifie**. Ce n'est pas la même chose que de les déclarer obsolètes.
 
 [🔝 Retour en haut de page](#table-des-matières)
 
